@@ -2,66 +2,48 @@
 #include <TM1637Display.h>
 
 /* =========================
-   디스플레이
+   하드웨어 설정
 ========================= */
 LiquidCrystal lcd(7, 8, 9, 10, 11, 12);
 TM1637Display display(4, 5);
 
-/* =========================
-   버튼
-========================= */
-const int RESET_BTN = 2;   // 확정 / 리셋
-const int MODE_BTN  = 3;   // 모드 이동
-
-/* =========================
-   압력 센서
-========================= */
-const int fsrPins[4] = {A0, A1, A2, A3};
-int fsrValues[4];
-int sumPressure = 0;
+const int RESET_BTN = 2;
+const int MODE_BTN  = 3;
+const int GREEN_LED = 6;
+const int RED_LED   = 13;
 
 /* =========================
    상태 정의
 ========================= */
-enum ExerciseMode {
-  MODE_SELECT,
-  PUSHUP,
-  SQUAT,
-  PLANK
-};
+enum ExerciseMode { MODE_SELECT, PUSHUP };
+enum SystemState { PREPARE, BASELINE_CAPTURE, CALIBRATION, NORMAL };
 
-enum SystemState {
-  CALIBRATION,
-  NORMAL
-};
-
-// 현재 상태 변수
-ExerciseMode currentExercise = MODE_SELECT; 
-SystemState systemState = CALIBRATION;
+ExerciseMode currentExercise = MODE_SELECT;
+SystemState systemState = PREPARE;
 
 /* =========================
-   모드 선택
+   전역 변수
 ========================= */
 int selectedIndex = 0;
-const char* modeNames[] = {"PUSH-UP", "SQUAT", "PLANK"};
+const char* modeNames[] = {"PUSH-UP"};
 
-/* =========================
-   PUSH-UP 변수
-========================= */
-enum PushState { READY, DOWN };
-PushState pushState = READY;
+unsigned long stateStartTime = 0;
 
-const int CALI_TARGET = 3;    // 학습단계에서 3회 측정인거
-int caliCount = 0;    // 학습단계에서 지금 몇회째 인지
-int downPeaks[3];   // 가장 아래로내려갔을때 합 배열
-int currentPeak = 0;    // 푸쉬업은 내려갈수록 압력 쎄짐. 그래서 계속 측정하다가 제일 압력쏄때가 가장 낮은 지점으로 판단
-float downAvg = 0;    // 완전히 내려갔을때 기준값
+/* ===== baseline ===== */
+float baseSum = 0;
+float baseAccumulator = 0;
+int baseSamples = 0;
 
+/* ===== calibration ===== */
+const int CALI_TARGET = 3;
+int caliCount = 0;
+float downPeaks[3];
+float downAvg = 0;
+float currentPeak = 0;
+
+/* ===== 운동 ===== */
 int pushUpCount = 0;
-
-/* 기준 비율 */
-const float DOWN_RATIO = 0.8;   // 80퍼만 내려가도 내려간걸로 ㅇㅈ
-const float UP_RATIO   = 0.4;   // 대충 40퍼만 올라와도 올라온걸로 ㅇㅈ
+int pushState = 0; // 0=READY(위), 1=DOWN(아래)
 
 /* =========================
    SETUP
@@ -69,12 +51,15 @@ const float UP_RATIO   = 0.4;   // 대충 40퍼만 올라와도 올라온걸로 
 void setup() {
   lcd.begin(16, 2);
   display.setBrightness(0x0f);
+
+  pinMode(RESET_BTN, INPUT_PULLUP);
+  pinMode(MODE_BTN, INPUT_PULLUP);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
   display.showNumberDec(0);
 
-  pinMode(RESET_BTN, INPUT_PULLUP);   // 버튼이 눌리지 않았을 때 입력이 흔들리지 않도록 아두이노가 내부 저항으로 핀을 안정시키는 설정
-  pinMode(MODE_BTN, INPUT_PULLUP);  // LOW는 눌렸을때, HIGH는 안눌렸을때 라고 이해
-
-  lcd.print("Smart Mat");
+  lcd.print("SMART MAT");
   delay(1000);
   lcd.clear();
 }
@@ -83,191 +68,225 @@ void setup() {
    LOOP
 ========================= */
 void loop() {
-  readSensors();  // 항상 최신정보 확보
 
-  switch (currentExercise) {
-    case MODE_SELECT:
-      handleModeSelect();
-      break;
-
-    case PUSHUP:
-      handlePushUp();
-      break;
-
-    case SQUAT:
-      lcd.setCursor(0, 0);
-      lcd.print("SQUAT MODE    ");    // 이거마저짜야한다잉
-      break;
-
-    case PLANK:
-      lcd.setCursor(0, 0);
-      lcd.print("PLANK MODE    ");    // 이것도요
-      break;
+  if (currentExercise == MODE_SELECT) {
+    handleModeSelect();
+    return;
   }
+
+  if (digitalRead(RESET_BTN) == LOW) {
+    delay(300);
+    resetSystem();
+    return;
+  }
+
+  handlePushUp();
 }
 
 /* =========================
-   센서 읽기
-========================= */
-void readSensors() {
-  sumPressure = 0;
-  for (int i = 0; i < 4; i++) {
-    fsrValues[i] = analogRead(fsrPins[i]);    // 지금 이 순간 매트 위에 걸린 압력을 숫자로 스냅샷 찍는 함수
-    sumPressure += fsrValues[i];
-  }
-}
-
-/* =========================
-   MODE 선택
+   MODE SELECT
 ========================= */
 void handleModeSelect() {
-  lcd.setCursor(0, 0);
-  lcd.print("SELECT MODE   ");  // 첫째줄에 이거 출력
 
-  lcd.setCursor(0, 1);
+  lcd.setCursor(0,0);
+  lcd.print("SELECT MODE   ");
+  lcd.setCursor(0,1);
   lcd.print("> ");
   lcd.print(modeNames[selectedIndex]);
-  lcd.print("   ");
+  lcd.print("        ");
 
-  // MODE 버튼 → 선택지 이동
   if (digitalRead(MODE_BTN) == LOW) {
-    delay(200); // 오류 방지
-    selectedIndex = (selectedIndex + 1) % 3;  // %쓴거면 느낌오지?
+    delay(250);
+    selectedIndex = (selectedIndex + 1) % 1;
   }
 
-  // RESET 버튼 → 선택 확정
-  if (digitalRead(RESET_BTN) == LOW) {  
-    delay(200);
-
-    resetPushUp();           // 이전운동상태리셋        (추후 운동별 reset 함수로 분기)
-    systemState = CALIBRATION;
-
-    if (selectedIndex == 0) currentExercise = PUSHUP;
-    if (selectedIndex == 1) currentExercise = SQUAT;
-    if (selectedIndex == 2) currentExercise = PLANK;
-
+  if (digitalRead(RESET_BTN) == LOW) {
+    delay(300);
+    currentExercise = PUSHUP;
+    systemState = PREPARE;
+    stateStartTime = millis();
     lcd.clear();
   }
 }
 
 /* =========================
-   PUSH-UP 로직
+   PUSHUP 통합 로직
 ========================= */
 void handlePushUp() {
 
-  bool resetPressed = (digitalRead(RESET_BTN) == LOW);
-  bool modePressed  = (digitalRead(MODE_BTN)  == LOW);    // 우선 버튼상태 읽고
+  int leftVal  = analogRead(A0);
+  int rightVal = analogRead(A1);
+  int currentSum = leftVal + rightVal;
 
-  /* ===== RESET + MODE : 캘리브레이션부터 다시 ===== */
-  if (resetPressed && modePressed) {
-    delay(300);
-    resetPushUp();
-    systemState = CALIBRATION;
-    lcd.clear();
-    return;
-  }
+  /* =========================
+     1단계: PREPARE (5초 카운트)
+  ========================= */
+  if (systemState == PREPARE) {
 
-  /* ===== RESET 단독 ===== */
-  if (resetPressed) {
-    delay(200);
+    unsigned long elapsed = millis() - stateStartTime;
+    int remain = 5 - (elapsed / 1000);
+    if (remain < 0) remain = 0;
 
-    if (systemState == CALIBRATION) {
-      // 캘리 중 → 캘리 0회부터
-      resetPushUp();
-      systemState = CALIBRATION;
+    lcd.setCursor(0,0);
+    lcd.print("Prepare...     ");
+    lcd.setCursor(0,1);
+    lcd.print("Start in ");
+    lcd.print(remain);
+    lcd.print("s      ");
+
+    if (elapsed >= 5000) {
+      systemState = BASELINE_CAPTURE;
+      stateStartTime = millis();
+      baseAccumulator = 0;
+      baseSamples = 0;
+      lcd.clear();
     }
-    else if (systemState == NORMAL) {
-      // 실전 중 → 카운트만 리셋 (기준 유지)
-      pushUpCount = 0;
-      pushState = READY;
-    }
-
-    lcd.clear();
     return;
   }
 
   /* =========================
-     CALIBRATION MODE
+     2단계: BASELINE_CAPTURE (3초 평균 측정)
+  ========================= */
+  if (systemState == BASELINE_CAPTURE) {
+
+    unsigned long elapsed = millis() - stateStartTime;
+    int remain = 3 - (elapsed / 1000);
+    if (remain < 0) remain = 0;
+
+    baseAccumulator += currentSum;
+    baseSamples++;
+
+    lcd.setCursor(0,0);
+    lcd.print("Hold Position  ");
+    lcd.setCursor(0,1);
+    lcd.print("Measure ");
+    lcd.print(remain);
+    lcd.print("s      ");
+
+    if (elapsed >= 3000) {
+      baseSum = baseAccumulator / baseSamples;
+      systemState = CALIBRATION;
+      stateStartTime = millis();
+      lcd.clear();
+      lcd.print("Calibrate 1/3  ");
+      delay(800);
+      lcd.clear();
+    }
+    return;
+  }
+
+  /* =========================
+     3단계: CALIBRATION (3회 깊이 학습)
   ========================= */
   if (systemState == CALIBRATION) {
 
-    lcd.setCursor(0, 0);
-    lcd.print("Calibrating ");
-    lcd.print(caliCount + 1);
-    lcd.print("/3   ");
+    lcd.setCursor(0,0);
+    lcd.print("Calibrate ");
+    lcd.print(caliCount+1);
+    lcd.print("/3     ");
 
-    lcd.setCursor(0, 1);
+    lcd.setCursor(0,1);
     lcd.print("SUM:");
-    lcd.print(sumPressure);
-    lcd.print("   ");
+    lcd.print(currentSum);
+    lcd.print("     ");
 
-    if (pushState == READY && sumPressure > 300) {  // 레디 했고, 무게 좀 실리면
-      pushState = DOWN;
-      currentPeak = sumPressure;  // 초기값 설정
+    float threshold = (downAvg == 0) ? baseSum * 0.15 : (downAvg - baseSum) * 0.15;
+    if (threshold < 40) threshold = 40;
+
+    if (pushState == 0 && (currentSum - baseSum) > threshold) {
+      pushState = 1;
+      currentPeak = currentSum;
     }
 
-    if (pushState == DOWN) {
-      if (sumPressure > currentPeak)
-        currentPeak = sumPressure;  // 가장 눌린 순간 찾기
+    if (pushState == 1) {
+      if (currentSum > currentPeak)
+        currentPeak = currentSum;
 
-      if (sumPressure < 200) {    
-        downPeaks[caliCount] = currentPeak;   // 횟수마다 배열에 저장
-        caliCount++;    // ㅇㅇ 이제 하나 더하고
-        pushState = READY;    // 새로 감지해야하니깐 다시 레디
-        currentPeak = 0;    // ㅇㅇ 당연히 피크값도 초기화해야함 그래야 기준이 안깨짐
-        delay(300);
+      if ((currentSum - baseSum) < threshold * 0.5) {
+        downPeaks[caliCount] = currentPeak;
+        caliCount++;
+        pushState = 0;
+        currentPeak = 0;
+        delay(400);
       }
     }
 
-    if (caliCount >= CALI_TARGET) {   // 3번 다했으면
-      downAvg = (downPeaks[0] + downPeaks[1] + downPeaks[2]) / 3.0;    // 평균계산 ㅋㅋ 
-      systemState = NORMAL;   // 이제 실전모드 시작이노
-
+    if (caliCount >= CALI_TARGET) {
+      downAvg = (downPeaks[0] + downPeaks[1] + downPeaks[2]) / 3.0;
+      systemState = NORMAL;
       lcd.clear();
-      lcd.print("Calibration OK");
-      delay(1000);     // ㅇㅇ LCD에 이제 표시요
+      lcd.print("START!         ");
+      delay(1000);
       lcd.clear();
     }
-
-    display.showNumberDec(0);   // 캘리땐 횟수개념 없으니깐 7세그엔 안나타냄요
     return;
   }
 
   /* =========================
-     NORMAL MODE
+     4단계: NORMAL (상대 위치 기반)
   ========================= */
-  float downTh = downAvg * DOWN_RATIO;
-  float upTh   = downAvg * UP_RATIO;
 
-  lcd.setCursor(0, 0);
-  lcd.print("SUM:");
-  lcd.print(sumPressure);
-  lcd.print("   ");   // 실시간 양손/양발 압력 합
+  float range = downAvg - baseSum;
 
-  lcd.setCursor(0, 1);
+  float downThreshold = baseSum + range * 0.75; // 75% 이상 내려가야 DOWN
+  float upThreshold   = baseSum + range * 0.35; // 35% 이하 올라오면 UP 인정
+
+  bool isBalanced = abs(leftVal - rightVal) < (currentSum * 0.4);
+
+  lcd.setCursor(0,0);
+  lcd.print("L:");
+  lcd.print(leftVal);
+  lcd.print(" R:");
+  lcd.print(rightVal);
+  lcd.print("   ");
+
+  lcd.setCursor(0,1);
   lcd.print("CNT:");
   lcd.print(pushUpCount);
-  lcd.print("   ");   // 완성된 푸쉬업 수 
+  lcd.print("     ");
 
-  if (pushState == READY && sumPressure > downTh) {    // 내려가기시작하면
-    pushState = DOWN;   // 내려간상태
+  // 내려감 감지
+  if (pushState == 0 && currentSum >= downThreshold) {
+
+    if (isBalanced) {
+      pushState = 1;
+      digitalWrite(GREEN_LED, HIGH);
+      digitalWrite(RED_LED, LOW);
+    } else {
+      digitalWrite(RED_LED, HIGH);
+    }
   }
 
-  if (pushState == DOWN && sumPressure < upTh) {    
-    pushState = READY;
+  // 올라옴 감지 → 카운트 증가
+  else if (pushState == 1 && currentSum <= upThreshold) {
+    pushState = 0;
     pushUpCount++;
+    display.showNumberDec(pushUpCount);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    delay(250);
   }
-
-  display.showNumberDec(pushUpCount);     // 7세그 표시
 }
 
 /* =========================
-   PUSH-UP 초기화
+   RESET
 ========================= */
-void resetPushUp() {
-  caliCount = 0;
+void resetSystem() {
+
+  currentExercise = MODE_SELECT;
+  systemState = PREPARE;
+
   pushUpCount = 0;
-  pushState = READY;
-  currentPeak = 0;
+  pushState = 0;
+  caliCount = 0;
+  baseSamples = 0;
+  baseAccumulator = 0;
+  baseSum = 0;
   downAvg = 0;
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  display.showNumberDec(0);
+  lcd.clear();
 }
