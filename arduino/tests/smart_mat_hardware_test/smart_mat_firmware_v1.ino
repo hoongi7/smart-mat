@@ -2,7 +2,7 @@
 #include <TM1637Display.h>
 
 /* =========================
-   하드웨어 설정
+   Hardware
 ========================= */
 LiquidCrystal lcd(7, 8, 9, 10, 11, 12);
 TM1637Display display(4, 5);
@@ -13,19 +13,24 @@ const int GREEN_LED = 6;
 const int RED_LED   = 13;
 
 /* =========================
-   상태 정의
+   State
 ========================= */
-enum ExerciseMode { MODE_SELECT, PUSHUP };
+enum ExerciseMode { MODE_SELECT, PUSHUP, SQUAT, PLANK };
 enum SystemState { PREPARE, BASELINE_CAPTURE, CALIBRATION, NORMAL };
 
 ExerciseMode currentExercise = MODE_SELECT;
 SystemState systemState = PREPARE;
 
 /* =========================
-   전역 변수
+   Global
 ========================= */
 int selectedIndex = 0;
-const char* modeNames[] = {"PUSH-UP"};
+const int TOTAL_MODES = 3;
+const char* modeNames[TOTAL_MODES] = {
+  "PUSH-UP",
+  "SQUAT",
+  "PLANK"
+};
 
 unsigned long stateStartTime = 0;
 
@@ -41,9 +46,9 @@ float downPeaks[3];
 float downAvg = 0;
 float currentPeak = 0;
 
-/* ===== 운동 ===== */
+/* ===== push-up ===== */
 int pushUpCount = 0;
-int pushState = 0; // 0=READY(위), 1=DOWN(아래)
+int pushState = 0; // 0=UP, 1=DOWN
 
 /* =========================
    SETUP
@@ -74,13 +79,22 @@ void loop() {
     return;
   }
 
-  if (digitalRead(RESET_BTN) == LOW) {
-    delay(300);
-    resetSystem();
-    return;
+  if (currentExercise == PUSHUP) {
+    if (digitalRead(RESET_BTN) == LOW) {
+      delay(300);
+      resetSystem();
+      return;
+    }
+    handlePushUp();
   }
 
-  handlePushUp();
+  else if (currentExercise == SQUAT) {
+    handleSquat();
+  }
+
+  else if (currentExercise == PLANK) {
+    handlePlank();
+  }
 }
 
 /* =========================
@@ -89,7 +103,8 @@ void loop() {
 void handleModeSelect() {
 
   lcd.setCursor(0,0);
-  lcd.print("SELECT MODE   ");
+  lcd.print("SELECT MODE    ");
+
   lcd.setCursor(0,1);
   lcd.print("> ");
   lcd.print(modeNames[selectedIndex]);
@@ -97,12 +112,16 @@ void handleModeSelect() {
 
   if (digitalRead(MODE_BTN) == LOW) {
     delay(250);
-    selectedIndex = (selectedIndex + 1) % 1;
+    selectedIndex = (selectedIndex + 1) % TOTAL_MODES;
   }
 
   if (digitalRead(RESET_BTN) == LOW) {
     delay(300);
-    currentExercise = PUSHUP;
+
+    if (selectedIndex == 0) currentExercise = PUSHUP;
+    else if (selectedIndex == 1) currentExercise = SQUAT;
+    else if (selectedIndex == 2) currentExercise = PLANK;
+
     systemState = PREPARE;
     stateStartTime = millis();
     lcd.clear();
@@ -110,7 +129,47 @@ void handleModeSelect() {
 }
 
 /* =========================
-   PUSHUP 통합 로직
+   SQUAT
+========================= */
+void handleSquat() {
+
+  lcd.setCursor(0,0);
+  lcd.print("SQUAT MODE     ");
+
+  lcd.setCursor(0,1);
+  lcd.print("Squat Running  ");
+
+  display.showNumberDec(0);
+
+  if (digitalRead(RESET_BTN) == LOW) {
+    delay(300);
+    currentExercise = MODE_SELECT;
+    lcd.clear();
+  }
+}
+
+/* =========================
+   PLANK
+========================= */
+void handlePlank() {
+
+  lcd.setCursor(0,0);
+  lcd.print("PLANK MODE     ");
+
+  lcd.setCursor(0,1);
+  lcd.print("Plank Running  ");
+
+  display.showNumberDec(0);
+
+  if (digitalRead(RESET_BTN) == LOW) {
+    delay(300);
+    currentExercise = MODE_SELECT;
+    lcd.clear();
+  }
+}
+
+/* =========================
+   PUSHUP
 ========================= */
 void handlePushUp() {
 
@@ -118,9 +177,7 @@ void handlePushUp() {
   int rightVal = analogRead(A1);
   int currentSum = leftVal + rightVal;
 
-  /* =========================
-     1단계: PREPARE (5초 카운트)
-  ========================= */
+  /* PREPARE 5s */
   if (systemState == PREPARE) {
 
     unsigned long elapsed = millis() - stateStartTime;
@@ -144,9 +201,7 @@ void handlePushUp() {
     return;
   }
 
-  /* =========================
-     2단계: BASELINE_CAPTURE (3초 평균 측정)
-  ========================= */
+  /* BASELINE 3s */
   if (systemState == BASELINE_CAPTURE) {
 
     unsigned long elapsed = millis() - stateStartTime;
@@ -166,7 +221,6 @@ void handlePushUp() {
     if (elapsed >= 3000) {
       baseSum = baseAccumulator / baseSamples;
       systemState = CALIBRATION;
-      stateStartTime = millis();
       lcd.clear();
       lcd.print("Calibrate 1/3  ");
       delay(800);
@@ -175,9 +229,7 @@ void handlePushUp() {
     return;
   }
 
-  /* =========================
-     3단계: CALIBRATION (3회 깊이 학습)
-  ========================= */
+  /* CALIBRATION */
   if (systemState == CALIBRATION) {
 
     lcd.setCursor(0,0);
@@ -190,7 +242,7 @@ void handlePushUp() {
     lcd.print(currentSum);
     lcd.print("     ");
 
-    float threshold = (downAvg == 0) ? baseSum * 0.15 : (downAvg - baseSum) * 0.15;
+    float threshold = baseSum * 0.15;
     if (threshold < 40) threshold = 40;
 
     if (pushState == 0 && (currentSum - baseSum) > threshold) {
@@ -222,16 +274,10 @@ void handlePushUp() {
     return;
   }
 
-  /* =========================
-     4단계: NORMAL (상대 위치 기반)
-  ========================= */
-
+  /* NORMAL */
   float range = downAvg - baseSum;
-
-  float downThreshold = baseSum + range * 0.75; // 75% 이상 내려가야 DOWN
-  float upThreshold   = baseSum + range * 0.35; // 35% 이하 올라오면 UP 인정
-
-  bool isBalanced = abs(leftVal - rightVal) < (currentSum * 0.4);
+  float downThreshold = baseSum + range * 0.75;
+  float upThreshold   = baseSum + range * 0.35;
 
   lcd.setCursor(0,0);
   lcd.print("L:");
@@ -245,25 +291,16 @@ void handlePushUp() {
   lcd.print(pushUpCount);
   lcd.print("     ");
 
-  // 내려감 감지
   if (pushState == 0 && currentSum >= downThreshold) {
-
-    if (isBalanced) {
-      pushState = 1;
-      digitalWrite(GREEN_LED, HIGH);
-      digitalWrite(RED_LED, LOW);
-    } else {
-      digitalWrite(RED_LED, HIGH);
-    }
+    pushState = 1;
+    digitalWrite(GREEN_LED, HIGH);
   }
 
-  // 올라옴 감지 → 카운트 증가
   else if (pushState == 1 && currentSum <= upThreshold) {
     pushState = 0;
     pushUpCount++;
     display.showNumberDec(pushUpCount);
     digitalWrite(GREEN_LED, LOW);
-    digitalWrite(RED_LED, LOW);
     delay(250);
   }
 }
