@@ -22,7 +22,7 @@ ExerciseMode currentExercise = MODE_SELECT;
 SystemState systemState = PREPARE;
 
 /* =========================
-   Global
+   Mode Select
 ========================= */
 int selectedIndex = 0;
 const int TOTAL_MODES = 3;
@@ -34,21 +34,30 @@ const char* modeNames[TOTAL_MODES] = {
 
 unsigned long stateStartTime = 0;
 
-/* ===== baseline ===== */
+/* ===== Shared Calibration Vars (Push-up용) ===== */
 float baseSum = 0;
 float baseAccumulator = 0;
 int baseSamples = 0;
 
-/* ===== calibration ===== */
 const int CALI_TARGET = 3;
 int caliCount = 0;
 float downPeaks[3];
 float downAvg = 0;
 float currentPeak = 0;
 
-/* ===== push-up ===== */
 int pushUpCount = 0;
-int pushState = 0; // 0=UP, 1=DOWN
+int pushState = 0;
+
+/* ===== Squat Vars ===== */
+float squatBase = 0;
+float squatAccumulator = 0;
+int squatSamples = 0;
+int squatCaliCount = 0;
+float squatPeaks[3];
+float squatDownAvg = 0;
+float squatCurrentPeak = 0;
+int squatState = 0;
+int squatCount = 0;
 
 /* =========================
    SETUP
@@ -82,13 +91,18 @@ void loop() {
   if (currentExercise == PUSHUP) {
     if (digitalRead(RESET_BTN) == LOW) {
       delay(300);
-      resetSystem();
+      resetPushup();
       return;
     }
     handlePushUp();
   }
 
   else if (currentExercise == SQUAT) {
+    if (digitalRead(RESET_BTN) == LOW) {
+      delay(300);
+      resetSquat();
+      return;
+    }
     handleSquat();
   }
 
@@ -118,66 +132,22 @@ void handleModeSelect() {
   if (digitalRead(RESET_BTN) == LOW) {
     delay(300);
 
-    if (selectedIndex == 0) currentExercise = PUSHUP;
-    else if (selectedIndex == 1) currentExercise = SQUAT;
-    else if (selectedIndex == 2) currentExercise = PLANK;
-
+    currentExercise = (ExerciseMode)(selectedIndex + 1);
     systemState = PREPARE;
     stateStartTime = millis();
     lcd.clear();
   }
 }
 
-/* =========================
-   SQUAT
-========================= */
-void handleSquat() {
-
-  lcd.setCursor(0,0);
-  lcd.print("SQUAT MODE     ");
-
-  lcd.setCursor(0,1);
-  lcd.print("Squat Running  ");
-
-  display.showNumberDec(0);
-
-  if (digitalRead(RESET_BTN) == LOW) {
-    delay(300);
-    currentExercise = MODE_SELECT;
-    lcd.clear();
-  }
-}
-
-/* =========================
-   PLANK
-========================= */
-void handlePlank() {
-
-  lcd.setCursor(0,0);
-  lcd.print("PLANK MODE     ");
-
-  lcd.setCursor(0,1);
-  lcd.print("Plank Running  ");
-
-  display.showNumberDec(0);
-
-  if (digitalRead(RESET_BTN) == LOW) {
-    delay(300);
-    currentExercise = MODE_SELECT;
-    lcd.clear();
-  }
-}
-
-/* =========================
-   PUSHUP
-========================= */
+/* ==================================================
+   PUSH-UP (완전 보존)
+================================================== */
 void handlePushUp() {
 
   int leftVal  = analogRead(A0);
   int rightVal = analogRead(A1);
   int currentSum = leftVal + rightVal;
 
-  /* PREPARE 5s */
   if (systemState == PREPARE) {
 
     unsigned long elapsed = millis() - stateStartTime;
@@ -201,7 +171,6 @@ void handlePushUp() {
     return;
   }
 
-  /* BASELINE 3s */
   if (systemState == BASELINE_CAPTURE) {
 
     unsigned long elapsed = millis() - stateStartTime;
@@ -229,7 +198,6 @@ void handlePushUp() {
     return;
   }
 
-  /* CALIBRATION */
   if (systemState == CALIBRATION) {
 
     lcd.setCursor(0,0);
@@ -274,7 +242,6 @@ void handlePushUp() {
     return;
   }
 
-  /* NORMAL */
   float range = downAvg - baseSum;
   float downThreshold = baseSum + range * 0.75;
   float upThreshold   = baseSum + range * 0.35;
@@ -295,7 +262,6 @@ void handlePushUp() {
     pushState = 1;
     digitalWrite(GREEN_LED, HIGH);
   }
-
   else if (pushState == 1 && currentSum <= upThreshold) {
     pushState = 0;
     pushUpCount++;
@@ -305,14 +271,131 @@ void handlePushUp() {
   }
 }
 
+/* ==================================================
+   SQUAT (Push-up과 동일 구조)
+================================================== */
+void handleSquat() {
+
+  int currentSum = analogRead(A0) + analogRead(A1);
+
+  if (systemState == PREPARE) {
+
+    unsigned long elapsed = millis() - stateStartTime;
+    int remain = 5 - (elapsed / 1000);
+    if (remain < 0) remain = 0;
+
+    lcd.setCursor(0,0);
+    lcd.print("Prepare...     ");
+    lcd.setCursor(0,1);
+    lcd.print("Start in ");
+    lcd.print(remain);
+    lcd.print("s      ");
+
+    if (elapsed >= 5000) {
+      systemState = BASELINE_CAPTURE;
+      stateStartTime = millis();
+      squatAccumulator = 0;
+      squatSamples = 0;
+      lcd.clear();
+    }
+    return;
+  }
+
+  if (systemState == BASELINE_CAPTURE) {
+
+    unsigned long elapsed = millis() - stateStartTime;
+
+    squatAccumulator += currentSum;
+    squatSamples++;
+
+    lcd.setCursor(0,0);
+    lcd.print("Stand Still    ");
+    lcd.setCursor(0,1);
+    lcd.print("Measuring...   ");
+
+    if (elapsed >= 3000) {
+      squatBase = squatAccumulator / squatSamples;
+      systemState = CALIBRATION;
+      squatCaliCount = 0;
+      lcd.clear();
+    }
+    return;
+  }
+
+  if (systemState == CALIBRATION) {
+
+    float threshold = squatBase * 0.20;
+
+    lcd.setCursor(0,0);
+    lcd.print("Calibrate ");
+    lcd.print(squatCaliCount+1);
+    lcd.print("/3     ");
+
+    if (squatState == 0 && (currentSum - squatBase) > threshold) {
+      squatState = 1;
+      squatCurrentPeak = currentSum;
+    }
+
+    if (squatState == 1) {
+      if (currentSum > squatCurrentPeak)
+        squatCurrentPeak = currentSum;
+
+      if ((currentSum - squatBase) < threshold * 0.5) {
+        squatPeaks[squatCaliCount] = squatCurrentPeak;
+        squatCaliCount++;
+        squatState = 0;
+        delay(400);
+      }
+    }
+
+    if (squatCaliCount >= 3) {
+      squatDownAvg = (squatPeaks[0] + squatPeaks[1] + squatPeaks[2]) / 3.0;
+      systemState = NORMAL;
+      lcd.clear();
+      lcd.print("START!         ");
+      delay(1000);
+      lcd.clear();
+    }
+    return;
+  }
+
+  float range = squatDownAvg - squatBase;
+  float downThreshold = squatBase + range * 0.75;
+  float upThreshold   = squatBase + range * 0.35;
+
+  lcd.setCursor(0,0);
+  lcd.print("Squat Count    ");
+  lcd.setCursor(0,1);
+  lcd.print(squatCount);
+  lcd.print(" reps          ");
+
+  if (squatState == 0 && currentSum >= downThreshold) {
+    squatState = 1;
+  }
+  else if (squatState == 1 && currentSum <= upThreshold) {
+    squatState = 0;
+    squatCount++;
+    display.showNumberDec(squatCount);
+    delay(250);
+  }
+}
+
+/* =========================
+   PLANK (문구만)
+========================= */
+void handlePlank() {
+
+  lcd.setCursor(0,0);
+  lcd.print("PLANK MODE     ");
+  lcd.setCursor(0,1);
+  lcd.print("Plank Running  ");
+}
+
 /* =========================
    RESET
 ========================= */
-void resetSystem() {
-
-  currentExercise = MODE_SELECT;
+void resetPushup() {
   systemState = PREPARE;
-
   pushUpCount = 0;
   pushState = 0;
   caliCount = 0;
@@ -320,10 +403,15 @@ void resetSystem() {
   baseAccumulator = 0;
   baseSum = 0;
   downAvg = 0;
+  lcd.clear();
+}
 
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(RED_LED, LOW);
-
-  display.showNumberDec(0);
+void resetSquat() {
+  systemState = PREPARE;
+  squatState = 0;
+  squatCount = 0;
+  squatSamples = 0;
+  squatAccumulator = 0;
+  squatCaliCount = 0;
   lcd.clear();
 }
